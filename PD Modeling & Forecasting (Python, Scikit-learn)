@@ -1,0 +1,189 @@
+{
+  "nbformat": 4,
+  "nbformat_minor": 0,
+  "metadata": {
+    "colab": {
+      "provenance": []
+    },
+    "kernelspec": {
+      "name": "python3",
+      "display_name": "Python 3"
+    },
+    "language_info": {
+      "name": "python"
+    }
+  },
+  "cells": [
+    {
+      "cell_type": "code",
+      "execution_count": 5,
+      "metadata": {
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        },
+        "id": "OaMozhestfJp",
+        "outputId": "b7094b96-2f51-4f0d-aef1-0b3ca0b7dbed"
+      },
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "inputs = {'S0': 100.0, 'sigma': 0.16, 'r': 0.0, 'T': 1.0, 'K': 120.0}\n",
+            "n_paths = 200000\n",
+            "price = 1.123071531987504\n",
+            "price_se = 0.006761614273197435\n",
+            "delta = 0.14559602003714478\n",
+            "gamma = 0.014008620895607171\n",
+            "vega = 22.90468945961251\n",
+            "settings = {'eps_pct': 0.01, 'vega_bump': 0.01, 'seed': 42}\n"
+          ]
+        }
+      ],
+      "source": [
+        "# Monte Carlo pricer + Greeks for a 1Y European call with K=120% * S0\n",
+        "\n",
+        "import numpy as np\n",
+        "\n",
+        "def mc_call_price_terminal(S0, K, r, sigma, T, Z, use_antithetic=True):\n",
+        "    \"\"\"\n",
+        "    Price a European call using terminal distribution under GBM.\n",
+        "    Reuses the same normal draws Z (CRN). If use_antithetic=True,\n",
+        "    augment with antithetic variates to reduce variance.\n",
+        "    \"\"\"\n",
+        "    drift = (r - 0.5 * sigma**2) * T\n",
+        "    vol = sigma * np.sqrt(T)\n",
+        "\n",
+        "    ST = S0 * np.exp(drift + vol * Z)\n",
+        "    payoff = np.maximum(ST - K, 0.0)\n",
+        "\n",
+        "    if use_antithetic:\n",
+        "        ST_a = S0 * np.exp(drift - vol * Z)  # antithetic: use - Z\n",
+        "        payoff_a = np.maximum(ST_a - K, 0.0)\n",
+        "        payoff = 0.5 * (payoff + payoff_a)\n",
+        "\n",
+        "    price = np.exp(-r * T) * np.mean(payoff)\n",
+        "    stderr = np.exp(-r * T) * np.std(payoff, ddof = 1) / np.sqrt(payoff.size)\n",
+        "    return price, stderr\n",
+        "\n",
+        "def greeks_mc(S0 = 100.0, sigma = 0.16, r = 0.02, T = 1.0, K_ratio = 1.20,\n",
+        "              n_paths = 200_000, eps_pct = 0.01, vega_bump = 0.01, seed = 7):\n",
+        "    \"\"\"\n",
+        "    Returns MC estimates for price, (Delta, Gamma, Vega) using CRN and central differences.\n",
+        "    - eps_pct: relative S bump (e.g., 0.01 = 1%)\n",
+        "    - vega_bump: absolute vol point bump (e.g., 0.01 = +1 vol point)\n",
+        "    \"\"\"\n",
+        "    rng = np.random.default_rng(seed)\n",
+        "    Z = rng.standard_normal(n_paths)  # common random numbers\n",
+        "\n",
+        "    K = K_ratio * S0\n",
+        "\n",
+        "    # Base price\n",
+        "    P0, se0 = mc_call_price_terminal(S0, K, r, sigma, T, Z)\n",
+        "\n",
+        "    # Spot bumps (central difference)\n",
+        "    hS  = eps_pct * S0\n",
+        "    Pup, _ = mc_call_price_terminal(S0 + hS, K, r, sigma, T, Z)\n",
+        "    Pdn, _ = mc_call_price_terminal(S0 - hS, K, r, sigma, T, Z)\n",
+        "    delta  = (Pup - Pdn) / (2.0 * hS)\n",
+        "    gamma  = (Pup - 2.0 * P0 + Pdn) / (hS**2)\n",
+        "\n",
+        "    # Vol bumps (central difference) — absolute vol points\n",
+        "    v = vega_bump\n",
+        "    Pvu, _ = mc_call_price_terminal(S0, K, r, sigma + v, T, Z)\n",
+        "    Pvd, _ = mc_call_price_terminal(S0, K, r, sigma - v, T, Z)\n",
+        "    vega   = (Pvu - Pvd) / (2.0 * v)\n",
+        "\n",
+        "    return {\n",
+        "        \"inputs\": dict(S0=S0, sigma=sigma, r=r, T=T, K=K),\n",
+        "        \"n_paths\": n_paths,\n",
+        "        \"price\": P0, \"price_se\": se0,\n",
+        "        \"delta\": delta, \"gamma\": gamma, \"vega\": vega,\n",
+        "        \"settings\": {\"eps_pct\": eps_pct, \"vega_bump\": vega_bump, \"seed\": seed}\n",
+        "    }\n",
+        "\n",
+        "# ---- Example: 1Y, K=120% ----\n",
+        "if __name__ == \"__main__\":\n",
+        "    res = greeks_mc(S0=100.0, sigma=0.16, r=0.00, T=1.0, K_ratio=1.20,\n",
+        "                    n_paths=200_000, eps_pct=0.01, vega_bump=0.01, seed=42)\n",
+        "    for k, v in res.items():\n",
+        "        print(k, \"=\", v)\n"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "import numpy as np\n",
+        "\n",
+        "# ---- Monte Carlo pricer: terminal-only (fast for European) ----\n",
+        "def mc_call_price_terminal(S0, K, r, sigma, T, Z, use_antithetic = True):\n",
+        "    \"\"\"\n",
+        "    Price a European call under risk-neutral GBM using terminal distribution.\n",
+        "    Z: standard normal draws (common random numbers across revaluations).\n",
+        "    \"\"\"\n",
+        "    drift = (r - 0.5 * sigma**2) * T\n",
+        "    vol   = sigma * np.sqrt(T)\n",
+        "\n",
+        "    ST  = S0 * np.exp(drift + vol * Z)\n",
+        "    pay = np.maximum(ST - K, 0.0)\n",
+        "\n",
+        "    if use_antithetic:\n",
+        "        STa  = S0 * np.exp(drift - vol * Z)  # antithetic\n",
+        "        paya = np.maximum(STa - K, 0.0)\n",
+        "        pay  = 0.5 * (pay + paya)\n",
+        "\n",
+        "    return np.exp(-r * T) * np.mean(pay)\n",
+        "\n",
+        "def gamma_mc(S0, K, r, sigma, T, Z, h_pct=0.01):\n",
+        "    \"\"\"\n",
+        "    Dollar Gamma via central difference with relative spot bump h_pct.\n",
+        "    Gamma ≈ [P(S(1+h)) - 2P(S) + P(S(1-h))] / (hS)^2\n",
+        "    \"\"\"\n",
+        "    hS  = h_pct * S0\n",
+        "    P0  = mc_call_price_terminal(S0,      K, r, sigma, T, Z)\n",
+        "    Pup = mc_call_price_terminal(S0+hS,   K, r, sigma, T, Z)\n",
+        "    Pdn = mc_call_price_terminal(S0-hS,   K, r, sigma, T, Z)\n",
+        "    return (Pup - 2.0*P0 + Pdn) / (hS**2)\n",
+        "\n",
+        "# ---- Inputs (feel free to change) ----\n",
+        "S0    = 100.0        # spot\n",
+        "sigma = 0.16         # annual vol\n",
+        "r     = 0.00         # risk-free rate\n",
+        "K     = 1.20 * S0    # 120% strike\n",
+        "days_in_year = 252\n",
+        "\n",
+        "T_30d = 30 / days_in_year\n",
+        "T_10d = 10 / days_in_year\n",
+        "\n",
+        "# ---- Common random numbers ----\n",
+        "rng = np.random.default_rng(2025)\n",
+        "Z   = rng.standard_normal(300_000)  # number of paths\n",
+        "\n",
+        "# ---- Gamma estimates ----\n",
+        "gamma_30d = gamma_mc(S0, K, r, sigma, T_30d, Z, h_pct=0.01)\n",
+        "gamma_10d = gamma_mc(S0, K, r, sigma, T_10d, Z, h_pct=0.01)\n",
+        "\n",
+        "print(f\"Gamma (30 days to maturity): {gamma_30d:.8f}\")\n",
+        "print(f\"Gamma (10 days to maturity): {gamma_10d:.8f}\")"
+      ],
+      "metadata": {
+        "colab": {
+          "base_uri": "https://localhost:8080/"
+        },
+        "id": "TdGYVzxDvUVc",
+        "outputId": "6b9d58b7-a4e2-4ac1-c92a-0f5e6fe813c1"
+      },
+      "execution_count": 6,
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": [
+            "Gamma (30 days to maturity): 0.00037018\n",
+            "Gamma (10 days to maturity): 0.00000000\n"
+          ]
+        }
+      ]
+    }
+  ]
+}
